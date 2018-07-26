@@ -2176,6 +2176,7 @@ bool AppInitMain(Config &config, boost::thread_group &threadGroup,
     // fHaveGenesis directly.
     // No locking, as this happens before any background thread is started.
     if (chainActive.Tip() == nullptr) {
+	LogPrintf("now chainActive.Tip() == nullptr\n");
         uiInterface.NotifyBlockTip.connect(BlockNotifyGenesisWait);
     } else {
         fHaveGenesis = true;

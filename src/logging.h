@@ -12,6 +12,12 @@
 #include <list>
 #include <mutex>
 #include <string>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <cstdio>
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+#include <cxxabi.h>
 
 static const bool DEFAULT_LOGTIMEMICROS = false;
 static const bool DEFAULT_LOGIPS = false;
@@ -66,6 +72,7 @@ private:
     std::atomic<uint32_t> logCategories{0};
 
     std::string LogTimestampStr(const std::string &str);
+    std::string LogWithTid(const std::string &str);
 
 public:
     bool fPrintToConsole = false;
@@ -73,6 +80,7 @@ public:
 
     bool fLogTimestamps = DEFAULT_LOGTIMESTAMPS;
     bool fLogTimeMicros = DEFAULT_LOGTIMEMICROS;
+    bool fLogWithTid  = true;
 
     std::atomic<bool> fReopenDebugLog{false};
 
@@ -106,6 +114,8 @@ static inline bool LogAcceptCategory(BCLog::LogFlags category) {
 /** Returns a string with the supported log categories */
 std::string ListLogCategories();
 
+
+std::string  backtrace();
 /** Return true if str parses as a log category and set the flag */
 bool GetLogCategory(BCLog::LogFlags &flag, const std::string &str);
 

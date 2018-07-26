@@ -959,6 +959,7 @@ void PeerLogicValidation::UpdatedBlockTip(const CBlockIndex *pindexNew,
                                           const CBlockIndex *pindexFork,
                                           bool fInitialDownload) {
     const int nNewHeight = pindexNew->nHeight;
+    LogPrintf("func:%s, current block index hash=%s\n", __func__,  pindexNew->GetBlockHash().ToString());
     connman->SetBestHeight(nNewHeight);
 
     if (!fInitialDownload) {

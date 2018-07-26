@@ -116,6 +116,55 @@ BCLog::Logger::~Logger() {
     }
 }
 
+std::string BCLog::Logger::LogWithTid(const std::string &str){
+	std::string strWithTid;
+	if(!fLogWithTid) return str;
+	char dest[30]{};
+	std::snprintf(dest, sizeof(dest), " tid: %ld ", syscall(SYS_gettid));
+	return std::string{dest} + str;
+}
+
+std::string  backtrace() {
+  unw_cursor_t cursor;
+  unw_context_t context;
+
+  unw_getcontext(&context);
+  unw_init_local(&cursor, &context);
+
+  std::string ret;
+  while (unw_step(&cursor) > 0) {
+    unw_word_t offset, pc;
+    unw_get_reg(&cursor, UNW_REG_IP, &pc);
+    if (pc == 0) {
+      break;
+    }
+    char buf[30]{};
+    int len = std::snprintf(buf, sizeof(buf), "0x%lx:", pc);
+    if (len < 0 ){
+	    return ret;
+    }
+    ret += buf;
+
+    char sym[256];
+    if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0) {
+      char* nameptr = sym;
+      int status;
+      char* demangled = abi::__cxa_demangle(sym, nullptr, nullptr, &status);
+      if (status == 0) {
+        nameptr = demangled;
+      }
+      char buf[256];
+      int len = snprintf(buf, sizeof(buf), " (%s+0x%lx)\n", nameptr, offset);
+      std::free(demangled);
+      if (len  < 0) {
+	      return ret;
+      }
+      ret += buf;
+    }   
+  }
+  return ret;
+}
+
 std::string BCLog::Logger::LogTimestampStr(const std::string &str) {
     std::string strStamped;
 
@@ -143,7 +192,9 @@ int BCLog::Logger::LogPrintStr(const std::string &str) {
     // Returns total number of characters written.
     int ret = 0;
 
-    std::string strTimestamped = LogTimestampStr(str);
+    std::string strTid = LogWithTid(str);
+
+    std::string strTimestamped = LogTimestampStr(strTid);
 
     if (fPrintToConsole) {
         // Print to console.

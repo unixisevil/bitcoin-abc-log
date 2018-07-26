@@ -2713,6 +2713,92 @@ public:
  * by copying pblock) - if that is not intended, care must be taken to remove
  * the last entry in blocksConnected in case of failure.
  */
+namespace {
+
+struct CCoinsStats {
+    int nHeight;
+    uint256 hashBlock;
+    uint64_t nTransactions;
+    uint64_t nTransactionOutputs;
+    uint64_t nBogoSize;
+    uint256 hashSerialized;
+    uint64_t nDiskSize;
+    Amount nTotalAmount;
+
+    CCoinsStats()
+        : nHeight(0), nTransactions(0), nTransactionOutputs(0), nBogoSize(0),
+          nDiskSize(0), nTotalAmount(0) {}
+
+    std::string ToString() const {
+        return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,bogosize=%d,"
+			"hash_serialized=%s,disk_size=%u,total_amount=%d\n",
+			nHeight, hashBlock.GetHex(), nTransactions,
+			nTransactionOutputs, nBogoSize,  hashSerialized.GetHex(),
+			nDiskSize,
+			nTotalAmount.GetSatoshis()
+			);
+    }
+};
+
+static void ApplyStats(CCoinsStats &stats, CHashWriter &ss, const uint256 &hash,
+                       const std::map<uint32_t, Coin> &outputs) {
+    assert(!outputs.empty());
+    ss << hash;
+    ss << VARINT(outputs.begin()->second.GetHeight() * 2 +
+                 outputs.begin()->second.IsCoinBase());
+    stats.nTransactions++;
+    for (const auto output : outputs) {
+        ss << VARINT(output.first + 1);
+        ss << output.second.GetTxOut().scriptPubKey;
+        ss << VARINT(output.second.GetTxOut().nValue.GetSatoshis());
+        stats.nTransactionOutputs++;
+        stats.nTotalAmount += output.second.GetTxOut().nValue;
+        stats.nBogoSize +=
+            32 /* txid */ + 4 /* vout index */ + 4 /* height + coinbase */ +
+            8 /* amount */ + 2 /* scriptPubKey len */ +
+            output.second.GetTxOut().scriptPubKey.size() /* scriptPubKey */;
+    }
+    ss << VARINT(0);
+}
+
+static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
+    std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
+
+    CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
+    stats.hashBlock = pcursor->GetBestBlock();
+    {
+        LOCK(cs_main);
+        stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
+    }
+    ss << stats.hashBlock;
+    uint256 prevkey;
+    std::map<uint32_t, Coin> outputs;
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+        COutPoint key;
+        Coin coin;
+        if (pcursor->GetKey(key) && pcursor->GetValue(coin)) {
+            if (!outputs.empty() && key.GetTxId() != prevkey) {
+                ApplyStats(stats, ss, prevkey, outputs);
+                outputs.clear();
+            }
+            prevkey = key.GetTxId();
+            outputs[key.GetN()] = std::move(coin);
+        } else {
+            return error("%s: unable to read value", __func__);
+        }
+        pcursor->Next();
+    }
+    if (!outputs.empty()) {
+        ApplyStats(stats, ss, prevkey, outputs);
+    }
+    stats.hashSerialized = ss.GetHash();
+    stats.nDiskSize = view->EstimateSize();
+    return true;
+}
+
+
+}
 static bool ConnectTip(const Config &config, CValidationState &state,
                        CBlockIndex *pindexNew,
                        const std::shared_ptr<const CBlock> &pblock,
@@ -2769,8 +2855,29 @@ static bool ConnectTip(const Config &config, CValidationState &state,
 
     // Write the chain state to disk, if necessary.
     if (!FlushStateToDisk(config.GetChainParams(), state,
-                          FLUSH_STATE_IF_NEEDED)) {
+                          FLUSH_STATE_ALWAYS)) {
         return false;
+    }
+    
+    CCoinsStats stats;
+    if (!GetUTXOStats(pcoinsTip, stats)) {
+	    LogPrintf("failed get utxo stats\n");
+	    return false;
+    }
+    FILE* fileout = fsbridge::fopen(GetDataDir() / "utxo.log" , "a");
+    if(!fileout){
+	    LogPrintf("failed open utxo.log\n");
+	    return false;
+    }
+    setbuf(fileout, nullptr);
+    CAutoFile logf{fileout, 0, 0};
+    auto line = stats.ToString();
+
+    try {
+       logf.write(line.c_str(), line.size());
+    }catch(const std::ios_base::failure &e){
+	    LogPrintf("wirte utxo.log failed:%s\n", e.what());
+	    return false;
     }
 
     int64_t nTime5 = GetTimeMicros();
@@ -3062,6 +3169,7 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
             }
 
             pindexNewTip = chainActive.Tip();
+	    LogPrintf("func:%s, pindexNewTip=%s\n", __func__, pindexNewTip->GetBlockHash().ToString());
             pindexFork = chainActive.FindFork(pindexOldTip);
             fInitialDownload = IsInitialBlockDownload();
 
@@ -3084,6 +3192,8 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
 
         // Always notify the UI if a new block tip was connected
         if (pindexFork != pindexNewTip) {
+	    LogPrintf("pindexFork=%p, pindexNewTip=%s\n", pindexFork, pindexNewTip->GetBlockHash().ToString());
+	    LogPrintf("backtrace=%s\n",  backtrace());
             uiInterface.NotifyBlockTip(fInitialDownload, pindexNewTip);
         }
     } while (pindexNewTip != pindexMostWork);
