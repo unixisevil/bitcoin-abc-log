@@ -2432,10 +2432,12 @@ static bool FlushStateToDisk(const CChainParams &chainparams,
 
                 // Flush the chainstate (which may refer to block index
                 // entries).
+		LogPrintf("before flush, cache size=%d, bestblock=%s\n", pcoinsTip->GetCacheSize(), pcoinsTip->GetBestBlock().ToString());
                 if (!pcoinsTip->Flush()) {
                     return AbortNode(state, "Failed to write to coin database");
                 }
                 nLastFlush = nNow;
+		//LogPrintf("fDoFullFlush=true, stack trace=%s\n", backtrace());
             }
         }
 
@@ -2730,27 +2732,33 @@ struct CCoinsStats {
           nDiskSize(0), nTotalAmount(0) {}
 
     std::string ToString() const {
-        return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,bogosize=%d,"
-			"hash_serialized=%s,disk_size=%u,total_amount=%d\n",
+        return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,"
+			"hash_serialized=%s,total_amount=%d\n",
 			nHeight, hashBlock.GetHex(), nTransactions,
-			nTransactionOutputs, nBogoSize,  hashSerialized.GetHex(),
-			nDiskSize,
+			nTransactionOutputs,  hashSerialized.GetHex(),
 			nTotalAmount.GetSatoshis()
 			);
     }
 };
 
-static void ApplyStats(CCoinsStats &stats, CHashWriter &ss, const uint256 &hash,
+static void ApplyStats(CCoinsStats &stats, CDataStream &ss, const uint256 &hash,
                        const std::map<uint32_t, Coin> &outputs) {
     assert(!outputs.empty());
     ss << hash;
     ss << VARINT(outputs.begin()->second.GetHeight() * 2 +
                  outputs.begin()->second.IsCoinBase());
+    LogPrintf("after serialize height and coinbase, get bytes=%s\n", HexStr(ss.str()));
+    //auto height = outputs.begin()->second.GetHeight();
+    //auto const& txout  = outputs.begin()->second.GetTxOut();
+    //LogPrintf("block height=%d, get coin value=%lu, scriptPubKey=%s\n",  height, txout.nValue, HexStr(txout.scriptPubKey));
     stats.nTransactions++;
     for (const auto output : outputs) {
         ss << VARINT(output.first + 1);
+        LogPrintf("after txindex+1, get bytes=%s\n", HexStr(ss.str()));
         ss << output.second.GetTxOut().scriptPubKey;
+        LogPrintf("after scriptPubKey get bytes=%s\n", HexStr(ss.str()));
         ss << VARINT(output.second.GetTxOut().nValue.GetSatoshis());
+        LogPrintf("after nValue get bytes=%s\n", HexStr(ss.str()));
         stats.nTransactionOutputs++;
         stats.nTotalAmount += output.second.GetTxOut().nValue;
         stats.nBogoSize +=
@@ -2765,21 +2773,25 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
 
     CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
+    CDataStream ds(SER_GETHASH, PROTOCOL_VERSION);
     stats.hashBlock = pcursor->GetBestBlock();
     {
         LOCK(cs_main);
         stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
     }
-    ss << stats.hashBlock;
+    ds << stats.hashBlock;
     uint256 prevkey;
     std::map<uint32_t, Coin> outputs;
+    LogPrintf("before iter db\n");
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         COutPoint key;
         Coin coin;
         if (pcursor->GetKey(key) && pcursor->GetValue(coin)) {
+	    //LogPrintf("key=%s, val=%s\n", key.ToString(), coin.GetTxOut().ToString());
             if (!outputs.empty() && key.GetTxId() != prevkey) {
-                ApplyStats(stats, ss, prevkey, outputs);
+		LogPrintf("prevkey=%s\n", key.GetTxId().ToString());
+                ApplyStats(stats, ds, prevkey, outputs);
                 outputs.clear();
             }
             prevkey = key.GetTxId();
@@ -2789,9 +2801,12 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
         }
         pcursor->Next();
     }
+    LogPrintf("after iter db\n");
     if (!outputs.empty()) {
-        ApplyStats(stats, ss, prevkey, outputs);
+        ApplyStats(stats, ds, prevkey, outputs);
     }
+    LogPrintf("bytes to hash=%s\n", HexStr(ds));
+    ss  << ds;
     stats.hashSerialized = ss.GetHash();
     stats.nDiskSize = view->EstimateSize();
     return true;
@@ -2878,6 +2893,10 @@ static bool ConnectTip(const Config &config, CValidationState &state,
     }catch(const std::ios_base::failure &e){
 	    LogPrintf("wirte utxo.log failed:%s\n", e.what());
 	    return false;
+    }
+
+    if (pindexNew->nHeight == 1) {
+	    AbortNode("terminate after recv height 1 block");
     }
 
     int64_t nTime5 = GetTimeMicros();
@@ -3169,7 +3188,7 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
             }
 
             pindexNewTip = chainActive.Tip();
-	    LogPrintf("func:%s, pindexNewTip=%s\n", __func__, pindexNewTip->GetBlockHash().ToString());
+	    LogPrintf("func:%s, Tip()=%s\n", __func__, pindexNewTip->GetBlockHash().ToString());
             pindexFork = chainActive.FindFork(pindexOldTip);
             fInitialDownload = IsInitialBlockDownload();
 
@@ -3193,7 +3212,7 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
         // Always notify the UI if a new block tip was connected
         if (pindexFork != pindexNewTip) {
 	    LogPrintf("pindexFork=%p, pindexNewTip=%s\n", pindexFork, pindexNewTip->GetBlockHash().ToString());
-	    LogPrintf("backtrace=%s\n",  backtrace());
+	    //LogPrintf("backtrace=%s\n",  backtrace());
             uiInterface.NotifyBlockTip(fInitialDownload, pindexNewTip);
         }
     } while (pindexNewTip != pindexMostWork);
