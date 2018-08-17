@@ -614,6 +614,7 @@ public:
         std::swap(error, check.error);
         std::swap(txdata, check.txdata);
     }
+    std::string  ToString() const ;
 
     ScriptError GetScriptError() const { return error; }
 };

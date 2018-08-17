@@ -8,6 +8,8 @@
 #include "memusage.h"
 #include "random.h"
 
+#include "logging.h"
+#include "tinyformat.h"
 #include <cassert>
 
 bool CCoinsView::GetCoin(const COutPoint &outpoint, Coin &coin) const {
@@ -76,6 +78,9 @@ CCoinsViewCache::FetchCoin(const COutPoint &outpoint) const {
     Coin tmp;
     if (!base->GetCoin(outpoint, tmp)) {
         return cacheCoins.end();
+    }
+    if(outpoint.GetTxId().GetHex() =="7e621eeb02874ab039a8566fd36f4591e65eca65313875221842c53de6907d6c" && outpoint.GetN() == 0) {
+	    LogPrintf("func %s: find outpoint from backend\n", __func__);
     }
     CCoinsMap::iterator ret =
         cacheCoins
@@ -147,6 +152,9 @@ bool CCoinsViewCache::SpendCoin(const COutPoint &outpoint, Coin *moveout) {
     CCoinsMap::iterator it = FetchCoin(outpoint);
     if (it == cacheCoins.end()) {
         return false;
+    }
+    if(outpoint.GetTxId().GetHex() =="7e621eeb02874ab039a8566fd36f4591e65eca65313875221842c53de6907d6c" && outpoint.GetN() == 0) {
+	    LogPrintf("it->flags=%d\n", it->second.flags);
     }
     cachedCoinsUsage -= it->second.coin.DynamicMemoryUsage();
     if (moveout) {

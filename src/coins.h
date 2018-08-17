@@ -203,6 +203,9 @@ protected:
 
 public:
     CCoinsViewCache(CCoinsView *baseIn);
+    const CCoinsMap& GetCache() const{
+	    return  cacheCoins;
+    }
 
     // Standard CCoinsView methods
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;

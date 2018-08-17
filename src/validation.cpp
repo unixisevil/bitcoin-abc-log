@@ -1391,9 +1391,10 @@ static void CheckForkWarningConditionsOnNewFork(CBlockIndex *pindexNewForkTip) {
     // should be detected by both). We define it this way because it allows us
     // to only store the highest fork tip (+ base) which meets the 7-block
     // condition and from this always have the most-likely-to-cause-warning fork
-    if (pfork && (!pindexBestForkTip ||
-                  (pindexBestForkTip &&
-                   pindexNewForkTip->nHeight > pindexBestForkTip->nHeight)) &&
+    if (pfork &&
+        (!pindexBestForkTip ||
+         (pindexBestForkTip &&
+          pindexNewForkTip->nHeight > pindexBestForkTip->nHeight)) &&
         pindexNewForkTip->nChainWork - pfork->nChainWork >
             (GetBlockProof(*pfork) * 7) &&
         chainActive.Height() - pindexNewForkTip->nHeight < 72) {
@@ -1455,17 +1456,36 @@ void UpdateCoins(CCoinsViewCache &view, const CTransaction &tx, CTxUndo &txundo,
     AddCoins(view, tx, nHeight);
 }
 
-void UpdateCoins(CCoinsViewCache &view, const CTransaction &tx, int nHeight) {
+void displayViewCache(const  CCoinsViewCache& inputs){
+	for(auto const&e : inputs.GetCache()){
+		LogPrintf("outpoint=%s, txout=%s, flags=%u\n", e.first.ToString(), e.second.coin.GetTxOut().ToString(), e.second.flags);
+	}
+}
+
+void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs,
+                 CTxUndo &txundo, int nHeight) {
     // Mark inputs spent.
     if (!tx.IsCoinBase()) {
         for (const CTxIn &txin : tx.vin) {
             bool is_spent = view.SpendCoin(txin.prevout);
             assert(is_spent);
         }
+	if (tx.GetId().GetHex() == "f261dfa4519e8dd75112ad987d9c822a92cd236d57d7a48603f96bfff2683524") {
+		LogPrintf("in func %s, after SpendCoin()\n", __func__);
+		displayViewCache(inputs);
+	}
     }
-
     // Add outputs.
-    AddCoins(view, tx, nHeight);
+    AddCoins(inputs, tx, nHeight);
+    if (tx.GetId().GetHex() == "f261dfa4519e8dd75112ad987d9c822a92cd236d57d7a48603f96bfff2683524") {
+		LogPrintf("in func %s, after AddCoins()\n", __func__);
+		displayViewCache(inputs);
+    }
+}
+
+void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, int nHeight) {
+    CTxUndo txundo;
+    UpdateCoins(tx, inputs, txundo, nHeight);
 }
 
 bool CScriptCheck::operator()() {
@@ -1474,6 +1494,13 @@ bool CScriptCheck::operator()() {
                         CachingTransactionSignatureChecker(ptxTo, nIn, amount,
                                                            cacheStore, txdata),
                         &error);
+}
+
+std::string CScriptCheck::ToString() const {
+ return strprintf("scriptcheck(pubkey=%s,amount=%d,txid=%s,nIn=%d,nFlags=%d,cacheStore=%d,error=%d,txdata=(%s,%s,%s))\n", HexStr(scriptPubKey),amount,
+			     ptxTo->GetId().GetHex(), nIn, nFlags, cacheStore, error, txdata.hashPrevouts.GetHex(), txdata.hashSequence.GetHex(), txdata.hashOutputs.GetHex()
+			    );
+
 }
 
 int GetSpendHeight(const CCoinsViewCache &inputs) {
@@ -1518,10 +1545,10 @@ bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
     }
 
     if (nValueIn < tx.GetValueOut()) {
-        return state.DoS(100, false, REJECT_INVALID, "bad-txns-in-belowout",
-                         false, strprintf("value in (%s) < value out (%s)",
-                                          FormatMoney(nValueIn),
-                                          FormatMoney(tx.GetValueOut())));
+        return state.DoS(
+            100, false, REJECT_INVALID, "bad-txns-in-belowout", false,
+            strprintf("value in (%s) < value out (%s)", FormatMoney(nValueIn),
+                      FormatMoney(tx.GetValueOut())));
     }
 
     // Tally transaction fees
@@ -1565,6 +1592,7 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
     // assumed valid block is invalid due to false scriptSigs this optimization
     // would allow an invalid chain to be accepted.
     if (!fScriptChecks) {
+	    LogPrintf("in %s:  scriptcheck=%d\n", __func__, fScriptChecks);
         return true;
     }
 
@@ -2126,6 +2154,7 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
+    LogPrintf("block hash=%s have %u  txs\n", block.GetHash().GetHex(), block.vtx.size());
     for (const auto &ptx : block.vtx) {
         const CTransaction &tx = *ptx;
 
@@ -2192,6 +2221,7 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
         bool fCacheResults = fJustCheck;
 
         std::vector<CScriptCheck> vChecks;
+	LogPrintf("before CheckInputs(), txid=%s, coinbase=%d\n", tx.GetId().GetHex(), tx.IsCoinBase());
         if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
                          fCacheResults, PrecomputedTransactionData(tx),
                          &vChecks)) {
@@ -2222,9 +2252,10 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
     Amount blockReward =
         nFees + GetBlockSubsidy(pindex->nHeight, consensusParams);
     if (block.vtx[0]->GetValueOut() > blockReward) {
-        return state.DoS(100, error("ConnectBlock(): coinbase pays too much "
-                                    "(actual=%d vs limit=%d)",
-                                    block.vtx[0]->GetValueOut(), blockReward),
+        return state.DoS(100,
+                         error("ConnectBlock(): coinbase pays too much "
+                               "(actual=%d vs limit=%d)",
+                               block.vtx[0]->GetValueOut(), blockReward),
                          REJECT_INVALID, "bad-cb-amount");
     }
 
@@ -2432,12 +2463,15 @@ static bool FlushStateToDisk(const CChainParams &chainparams,
 
                 // Flush the chainstate (which may refer to block index
                 // entries).
-		LogPrintf("before flush, cache size=%d, bestblock=%s\n", pcoinsTip->GetCacheSize(), pcoinsTip->GetBestBlock().ToString());
+                LogPrintf("before flush, cache size=%d, bestblock=%s\n",
+                          pcoinsTip->GetCacheSize(),
+                          pcoinsTip->GetBestBlock().ToString());
                 if (!pcoinsTip->Flush()) {
                     return AbortNode(state, "Failed to write to coin database");
                 }
                 nLastFlush = nNow;
-		//LogPrintf("fDoFullFlush=true, stack trace=%s\n", backtrace());
+                // LogPrintf("fDoFullFlush=true, stack trace=%s\n",
+                // backtrace());
             }
         }
 
@@ -2450,8 +2484,8 @@ static bool FlushStateToDisk(const CChainParams &chainparams,
             nLastSetChain = nNow;
         }
     } catch (const std::runtime_error &e) {
-        return AbortNode(
-            state, std::string("System error while flushing: ") + e.what());
+        return AbortNode(state, std::string("System error while flushing: ") +
+                                    e.what());
     }
     return true;
 }
@@ -2733,11 +2767,10 @@ struct CCoinsStats {
 
     std::string ToString() const {
         return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,"
-			"hash_serialized=%s,total_amount=%d\n",
-			nHeight, hashBlock.GetHex(), nTransactions,
-			nTransactionOutputs,  hashSerialized.GetHex(),
-			nTotalAmount.GetSatoshis()
-			);
+                         "hash_serialized=%s,total_amount=%d\n",
+                         nHeight, hashBlock.GetHex(), nTransactions,
+                         nTransactionOutputs, hashSerialized.GetHex(),
+                         nTotalAmount.GetSatoshis());
     }
 };
 
@@ -2747,18 +2780,19 @@ static void ApplyStats(CCoinsStats &stats, CDataStream &ss, const uint256 &hash,
     ss << hash;
     ss << VARINT(outputs.begin()->second.GetHeight() * 2 +
                  outputs.begin()->second.IsCoinBase());
-    LogPrintf("after serialize height and coinbase, get bytes=%s\n", HexStr(ss.str()));
-    //auto height = outputs.begin()->second.GetHeight();
-    //auto const& txout  = outputs.begin()->second.GetTxOut();
-    //LogPrintf("block height=%d, get coin value=%lu, scriptPubKey=%s\n",  height, txout.nValue, HexStr(txout.scriptPubKey));
+    // LogPrintf("after serialize height and coinbase, get bytes=%s\n",
+    // HexStr(ss.str())); auto height = outputs.begin()->second.GetHeight(); auto
+    // const& txout  = outputs.begin()->second.GetTxOut(); LogPrintf("block
+    // height=%d, get coin value=%lu, scriptPubKey=%s\n",  height, txout.nValue,
+    // HexStr(txout.scriptPubKey));
     stats.nTransactions++;
     for (const auto output : outputs) {
         ss << VARINT(output.first + 1);
-        LogPrintf("after txindex+1, get bytes=%s\n", HexStr(ss.str()));
+        // LogPrintf("after txindex+1, get bytes=%s\n", HexStr(ss.str()));
         ss << output.second.GetTxOut().scriptPubKey;
-        LogPrintf("after scriptPubKey get bytes=%s\n", HexStr(ss.str()));
+        // LogPrintf("after scriptPubKey get bytes=%s\n", HexStr(ss.str()));
         ss << VARINT(output.second.GetTxOut().nValue.GetSatoshis());
-        LogPrintf("after nValue get bytes=%s\n", HexStr(ss.str()));
+        // LogPrintf("after nValue get bytes=%s\n", HexStr(ss.str()));
         stats.nTransactionOutputs++;
         stats.nTotalAmount += output.second.GetTxOut().nValue;
         stats.nBogoSize +=
@@ -2782,15 +2816,16 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     ds << stats.hashBlock;
     uint256 prevkey;
     std::map<uint32_t, Coin> outputs;
-    LogPrintf("before iter db\n");
+    // LogPrintf("before iter db\n");
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         COutPoint key;
         Coin coin;
         if (pcursor->GetKey(key) && pcursor->GetValue(coin)) {
-	    //LogPrintf("key=%s, val=%s\n", key.ToString(), coin.GetTxOut().ToString());
+            // LogPrintf("key=%s, val=%s\n", key.ToString(),
+            // coin.GetTxOut().ToString());
             if (!outputs.empty() && key.GetTxId() != prevkey) {
-		LogPrintf("prevkey=%s\n", key.GetTxId().ToString());
+                // LogPrintf("prevkey=%s\n", key.GetTxId().ToString());
                 ApplyStats(stats, ds, prevkey, outputs);
                 outputs.clear();
             }
@@ -2801,19 +2836,18 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
         }
         pcursor->Next();
     }
-    LogPrintf("after iter db\n");
+    // LogPrintf("after iter db\n");
     if (!outputs.empty()) {
         ApplyStats(stats, ds, prevkey, outputs);
     }
-    LogPrintf("bytes to hash=%s\n", HexStr(ds));
-    ss  << ds;
+    // LogPrintf("bytes to hash=%s\n", HexStr(ds));
+    ss << ds;
     stats.hashSerialized = ss.GetHash();
     stats.nDiskSize = view->EstimateSize();
     return true;
 }
 
-
-}
+} // namespace
 static bool ConnectTip(const Config &config, CValidationState &state,
                        CBlockIndex *pindexNew,
                        const std::shared_ptr<const CBlock> &pblock,
@@ -2869,34 +2903,35 @@ static bool ConnectTip(const Config &config, CValidationState &state,
              (nTime4 - nTime3) * 0.001, nTimeFlush * 0.000001);
 
     // Write the chain state to disk, if necessary.
-    if (!FlushStateToDisk(config.GetChainParams(), state,
-                          FLUSH_STATE_ALWAYS)) {
+    if (!FlushStateToDisk(config.GetChainParams(), state, FLUSH_STATE_ALWAYS)) {
         return false;
     }
-    
-    CCoinsStats stats;
-    if (!GetUTXOStats(pcoinsTip, stats)) {
-	    LogPrintf("failed get utxo stats\n");
-	    return false;
-    }
-    FILE* fileout = fsbridge::fopen(GetDataDir() / "utxo.log" , "a");
-    if(!fileout){
-	    LogPrintf("failed open utxo.log\n");
-	    return false;
-    }
-    setbuf(fileout, nullptr);
-    CAutoFile logf{fileout, 0, 0};
-    auto line = stats.ToString();
 
-    try {
-       logf.write(line.c_str(), line.size());
-    }catch(const std::ios_base::failure &e){
-	    LogPrintf("wirte utxo.log failed:%s\n", e.what());
-	    return false;
-    }
+    if (pindexNew->nHeight > 0) {
+        CCoinsStats stats;
+        if (!GetUTXOStats(pcoinsTip, stats)) {
+            LogPrintf("failed get utxo stats\n");
+            return false;
+        }
+        FILE *fileout = fsbridge::fopen(GetDataDir() / "utxo.log", "a");
+        if (!fileout) {
+            LogPrintf("failed open utxo.log\n");
+            return false;
+        }
+        setbuf(fileout, nullptr);
+        CAutoFile logf{fileout, 0, 0};
+        auto line = stats.ToString();
 
-    if (pindexNew->nHeight == 1) {
-	    AbortNode("terminate after recv height 1 block");
+        try {
+            logf.write(line.c_str(), line.size());
+        } catch (const std::ios_base::failure &e) {
+            LogPrintf("wirte utxo.log failed:%s\n", e.what());
+            return false;
+        }
+
+        if (pindexNew->nHeight == 383) {
+            AbortNode("terminate after recv height 383 block");
+        }
     }
 
     int64_t nTime5 = GetTimeMicros();
@@ -3188,7 +3223,7 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
             }
 
             pindexNewTip = chainActive.Tip();
-	    LogPrintf("func:%s, Tip()=%s\n", __func__, pindexNewTip->GetBlockHash().ToString());
+            //LogPrintf("func:%s, Tip()=%s\n", __func__, pindexNewTip->GetBlockHash().ToString());
             pindexFork = chainActive.FindFork(pindexOldTip);
             fInitialDownload = IsInitialBlockDownload();
 
@@ -3211,8 +3246,8 @@ bool ActivateBestChain(const Config &config, CValidationState &state,
 
         // Always notify the UI if a new block tip was connected
         if (pindexFork != pindexNewTip) {
-	    LogPrintf("pindexFork=%p, pindexNewTip=%s\n", pindexFork, pindexNewTip->GetBlockHash().ToString());
-	    //LogPrintf("backtrace=%s\n",  backtrace());
+            //LogPrintf("pindexFork=%p, pindexNewTip=%s\n", pindexFork, pindexNewTip->GetBlockHash().ToString());
+            // LogPrintf("backtrace=%s\n",  backtrace());
             uiInterface.NotifyBlockTip(fInitialDownload, pindexNewTip);
         }
     } while (pindexNewTip != pindexMostWork);
@@ -3709,8 +3744,9 @@ static bool CheckIndexAgainstCheckpoint(const CBlockIndex *pindexPrev,
     // Check that the block chain matches the known block chain up to a
     // checkpoint.
     if (!Checkpoints::CheckBlock(checkpoints, nHeight, hash)) {
-        return state.DoS(100, error("%s: rejected by checkpoint lock-in at %d",
-                                    __func__, nHeight),
+        return state.DoS(100,
+                         error("%s: rejected by checkpoint lock-in at %d",
+                               __func__, nHeight),
                          REJECT_CHECKPOINT, "checkpoint mismatch");
     }
 
@@ -3945,9 +3981,8 @@ static bool AcceptBlockHeader(const Config &config, const CBlockHeader &block,
         }
 
         assert(pindexPrev);
-        if (fCheckpointsEnabled &&
-            !CheckIndexAgainstCheckpoint(pindexPrev, state, chainparams,
-                                         hash)) {
+        if (fCheckpointsEnabled && !CheckIndexAgainstCheckpoint(
+                                       pindexPrev, state, chainparams, hash)) {
             return error("%s: CheckIndexAgainstCheckpoint(): %s", __func__,
                          state.GetRejectReason().c_str());
         }
@@ -4409,8 +4444,9 @@ static void FindFilesToPrune(std::set<int> &setFilesToPrune,
         }
     }
 
-    LogPrint(BCLog::PRUNE, "Prune: target=%dMiB actual=%dMiB diff=%dMiB "
-                           "max_prune_height=%d removed %d blk/rev pairs\n",
+    LogPrint(BCLog::PRUNE,
+             "Prune: target=%dMiB actual=%dMiB diff=%dMiB "
+             "max_prune_height=%d removed %d blk/rev pairs\n",
              nPruneTarget / 1024 / 1024, nCurrentUsage / 1024 / 1024,
              ((int64_t)nPruneTarget - (int64_t)nCurrentUsage) / 1024 / 1024,
              nLastBlockWeCanPrune, count);
@@ -4774,11 +4810,10 @@ bool CVerifyDB::VerifyDB(const Config &config, CCoinsView *coinsview,
             boost::this_thread::interruption_point();
             uiInterface.ShowProgress(
                 _("Verifying blocks..."),
-                std::max(1,
-                         std::min(99,
-                                  100 - (int)(((double)(chainActive.Height() -
-                                                        pindex->nHeight)) /
-                                              (double)nCheckDepth * 50))));
+                std::max(
+                    1, std::min(99, 100 - (int)(((double)(chainActive.Height() -
+                                                          pindex->nHeight)) /
+                                                (double)nCheckDepth * 50))));
             pindex = chainActive.Next(pindex);
             CBlock block;
             if (!ReadBlockFromDisk(block, pindex, config)) {
