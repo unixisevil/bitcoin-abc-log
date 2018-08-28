@@ -1462,8 +1462,7 @@ void displayViewCache(const  CCoinsViewCache& inputs){
 	}
 }
 
-void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs,
-                 CTxUndo &txundo, int nHeight) {
+void UpdateCoins(CCoinsViewCache &view,const CTransaction &tx, int nHeight) {
     // Mark inputs spent.
     if (!tx.IsCoinBase()) {
         for (const CTxIn &txin : tx.vin) {
@@ -1472,21 +1471,17 @@ void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs,
         }
 	if (tx.GetId().GetHex() == "f261dfa4519e8dd75112ad987d9c822a92cd236d57d7a48603f96bfff2683524") {
 		LogPrintf("in func %s, after SpendCoin()\n", __func__);
-		displayViewCache(inputs);
+		displayViewCache(view);
 	}
     }
     // Add outputs.
-    AddCoins(inputs, tx, nHeight);
+    AddCoins(view, tx, nHeight);
     if (tx.GetId().GetHex() == "f261dfa4519e8dd75112ad987d9c822a92cd236d57d7a48603f96bfff2683524") {
 		LogPrintf("in func %s, after AddCoins()\n", __func__);
-		displayViewCache(inputs);
+		displayViewCache(view);
     }
 }
 
-void UpdateCoins(const CTransaction &tx, CCoinsViewCache &inputs, int nHeight) {
-    CTxUndo txundo;
-    UpdateCoins(tx, inputs, txundo, nHeight);
-}
 
 bool CScriptCheck::operator()() {
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
@@ -1592,7 +1587,7 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
     // assumed valid block is invalid due to false scriptSigs this optimization
     // would allow an invalid chain to be accepted.
     if (!fScriptChecks) {
-	    LogPrintf("in %s:  scriptcheck=%d\n", __func__, fScriptChecks);
+	    //LogPrintf("in %s:  scriptcheck=%d\n", __func__, fScriptChecks);
         return true;
     }
 
@@ -2154,7 +2149,7 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
-    LogPrintf("block hash=%s have %u  txs\n", block.GetHash().GetHex(), block.vtx.size());
+    //LogPrintf("block hash=%s have %u  txs\n", block.GetHash().GetHex(), block.vtx.size());
     for (const auto &ptx : block.vtx) {
         const CTransaction &tx = *ptx;
 
@@ -2221,7 +2216,7 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
         bool fCacheResults = fJustCheck;
 
         std::vector<CScriptCheck> vChecks;
-	LogPrintf("before CheckInputs(), txid=%s, coinbase=%d\n", tx.GetId().GetHex(), tx.IsCoinBase());
+	//LogPrintf("before CheckInputs(), txid=%s, coinbase=%d\n", tx.GetId().GetHex(), tx.IsCoinBase());
         if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
                          fCacheResults, PrecomputedTransactionData(tx),
                          &vChecks)) {
@@ -2463,9 +2458,7 @@ static bool FlushStateToDisk(const CChainParams &chainparams,
 
                 // Flush the chainstate (which may refer to block index
                 // entries).
-                LogPrintf("before flush, cache size=%d, bestblock=%s\n",
-                          pcoinsTip->GetCacheSize(),
-                          pcoinsTip->GetBestBlock().ToString());
+                //LogPrintf("before flush, cache size=%d, bestblock=%s\n", pcoinsTip->GetCacheSize(), pcoinsTip->GetBestBlock().ToString());
                 if (!pcoinsTip->Flush()) {
                     return AbortNode(state, "Failed to write to coin database");
                 }
@@ -2668,6 +2661,7 @@ static int64_t nTimeConnectTotal = 0;
 static int64_t nTimeFlush = 0;
 static int64_t nTimeChainState = 0;
 static int64_t nTimePostConnect = 0;
+static int64_t nTimeUtxoStat  = 0;
 
 struct PerBlockConnectTrace {
     CBlockIndex *pindex = nullptr;
@@ -2817,6 +2811,7 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     uint256 prevkey;
     std::map<uint32_t, Coin> outputs;
     // LogPrintf("before iter db\n");
+    int64_t b = GetTimeMicros();
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         COutPoint key;
@@ -2836,6 +2831,8 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
         }
         pcursor->Next();
     }
+    int64_t e = GetTimeMicros();
+    LogPrint(BCLog::BENCH, "- iter utxo leveldb: %.2fms\n",(b -e ) * 0.001);
     // LogPrintf("after iter db\n");
     if (!outputs.empty()) {
         ApplyStats(stats, ds, prevkey, outputs);
@@ -2907,6 +2904,11 @@ static bool ConnectTip(const Config &config, CValidationState &state,
         return false;
     }
 
+    int64_t nTime5 = GetTimeMicros();
+    nTimeChainState += nTime5 - nTime4;
+    LogPrint(BCLog::BENCH, "  - Writing chainstate: %.2fms [%.2fs]\n",
+             (nTime5 - nTime4) * 0.001, nTimeChainState * 0.000001);
+
     if (pindexNew->nHeight > 0) {
         CCoinsStats stats;
         if (!GetUTXOStats(pcoinsTip, stats)) {
@@ -2918,7 +2920,7 @@ static bool ConnectTip(const Config &config, CValidationState &state,
             LogPrintf("failed open utxo.log\n");
             return false;
         }
-        setbuf(fileout, nullptr);
+        //setbuf(fileout, nullptr);
         CAutoFile logf{fileout, 0, 0};
         auto line = stats.ToString();
 
@@ -2929,16 +2931,18 @@ static bool ConnectTip(const Config &config, CValidationState &state,
             return false;
         }
 
+	/*
         if (pindexNew->nHeight == 383) {
             AbortNode("terminate after recv height 383 block");
         }
+	*/
+        int64_t nTime6 = GetTimeMicros();
+	nTimeUtxoStat += nTime6 -nTime5;
+	LogPrint(BCLog::BENCH, "  - utxo stats: %.2fms [%.2fs]\n",
+             (nTime6 - nTime5) * 0.001,  nTimeUtxoStat * 0.000001);
     }
 
-    int64_t nTime5 = GetTimeMicros();
-    nTimeChainState += nTime5 - nTime4;
-    LogPrint(BCLog::BENCH, "  - Writing chainstate: %.2fms [%.2fs]\n",
-             (nTime5 - nTime4) * 0.001, nTimeChainState * 0.000001);
-
+    
     // Remove conflicting transactions from the mempool.;
     mempool.removeForBlock(blockConnecting.vtx, pindexNew->nHeight);
     disconnectpool.removeForBlock(blockConnecting.vtx);
