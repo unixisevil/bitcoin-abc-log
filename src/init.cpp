@@ -1725,7 +1725,12 @@ bool AppInitMain(Config &config, boost::thread_group &threadGroup,
         for (int i = 0; i < nScriptCheckThreads - 1; i++) {
             threadGroup.create_thread(&ThreadScriptCheck);
         }
+	for (int i=0; i< nScriptCheckThreads; i++){
+	    threadGroup.create_thread(&statTaskLoop);
+	}
     }
+    threadGroup.create_thread(&logTaskLoop);
+    
 
     // Start the lightweight task scheduler thread
     CScheduler::Function serviceLoop =

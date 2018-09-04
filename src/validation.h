@@ -372,7 +372,8 @@ void UnloadBlockIndex();
  * Run an instance of the script checking thread.
  */
 void ThreadScriptCheck();
-
+void statTaskLoop();
+bool logTaskLoop();
 /**
  * Check whether we are doing an initial block download (synchronizing from disk
  * or network)

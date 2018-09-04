@@ -49,7 +49,9 @@
 #include <boost/math/distributions/poisson.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 #include <boost/thread.hpp>
-
+#include <queue>
+#include <mutex>
+#include <condition_variable>
 #if defined(NDEBUG)
 #error "Bitcoin cannot be compiled without assertions."
 #endif
@@ -2745,19 +2747,57 @@ public:
  */
 namespace {
 
+template<typename T>
+class threadsafe_queue
+{
+private:
+    mutable std::mutex mut;
+    std::queue<T> data_queue;
+    std::condition_variable data_cond;
+public:
+    threadsafe_queue(){}
+
+    void push(T new_value)
+    {
+        std::lock_guard<std::mutex> lk(mut);
+        data_queue.push(std::move(new_value));
+        data_cond.notify_one();
+    }
+
+    void wait_and_pop(T& value)
+    {
+        std::unique_lock<std::mutex> lk(mut);
+        data_cond.wait(lk,[this]{return !data_queue.empty();});
+        value=std::move(data_queue.front());
+        data_queue.pop();
+    }
+    
+    bool try_pop(T& value)
+    {
+        std::lock_guard<std::mutex> lk(mut);
+        if(data_queue.empty())
+            return false;
+        value=std::move(data_queue.front());
+        data_queue.pop();
+    }
+
+    bool empty() const
+    {
+        std::lock_guard<std::mutex> lk(mut);
+        return data_queue.empty();
+    }
+};
+
 struct CCoinsStats {
     int nHeight;
     uint256 hashBlock;
     uint64_t nTransactions;
     uint64_t nTransactionOutputs;
-    uint64_t nBogoSize;
     uint256 hashSerialized;
-    uint64_t nDiskSize;
     Amount nTotalAmount;
 
     CCoinsStats()
-        : nHeight(0), nTransactions(0), nTransactionOutputs(0), nBogoSize(0),
-          nDiskSize(0), nTotalAmount(0) {}
+        : nHeight(0), nTransactions(0), nTransactionOutputs(0),nTotalAmount(0) {}
 
     std::string ToString() const {
         return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,"
@@ -2767,6 +2807,10 @@ struct CCoinsStats {
                          nTotalAmount.GetSatoshis());
     }
 };
+
+threadsafe_queue<CCoinsViewCursor*>  statQueue;
+threadsafe_queue<CCoinsStats>        logQueue;
+
 
 static void ApplyStats(CCoinsStats &stats, CDataStream &ss, const uint256 &hash,
                        const std::map<uint32_t, Coin> &outputs) {
@@ -2789,19 +2833,17 @@ static void ApplyStats(CCoinsStats &stats, CDataStream &ss, const uint256 &hash,
         // LogPrintf("after nValue get bytes=%s\n", HexStr(ss.str()));
         stats.nTransactionOutputs++;
         stats.nTotalAmount += output.second.GetTxOut().nValue;
-        stats.nBogoSize +=
-            32 /* txid */ + 4 /* vout index */ + 4 /* height + coinbase */ +
-            8 /* amount */ + 2 /* scriptPubKey len */ +
-            output.second.GetTxOut().scriptPubKey.size() /* scriptPubKey */;
     }
     ss << VARINT(0);
 }
 
-static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
-    std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
+static bool GetUTXOStats(CCoinsViewCursor* cursor) {
+    std::unique_ptr<CCoinsViewCursor> pcursor(cursor);
 
     CHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
     CDataStream ds(SER_GETHASH, PROTOCOL_VERSION);
+    
+    CCoinsStats stats;
     stats.hashBlock = pcursor->GetBestBlock();
     {
         LOCK(cs_main);
@@ -2832,7 +2874,7 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
         pcursor->Next();
     }
     int64_t e = GetTimeMicros();
-    LogPrint(BCLog::BENCH, "- iter utxo leveldb: %.2fms\n",(b -e ) * 0.001);
+    LogPrint(BCLog::BENCH, "- iter utxo leveldb: %.2fms\n",(e-b ) * 0.001);
     // LogPrintf("after iter db\n");
     if (!outputs.empty()) {
         ApplyStats(stats, ds, prevkey, outputs);
@@ -2840,11 +2882,46 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     // LogPrintf("bytes to hash=%s\n", HexStr(ds));
     ss << ds;
     stats.hashSerialized = ss.GetHash();
-    stats.nDiskSize = view->EstimateSize();
+    logQueue.push(stats);
     return true;
 }
 
-} // namespace
+
+} // utxo  stat  namespace
+
+void statTaskLoop(){
+        RenameThread("utxo-stat");
+	for(;;){
+		CCoinsViewCursor*  cur{nullptr};
+		statQueue.wait_and_pop(cur);
+		GetUTXOStats(cur);
+	}
+}
+
+bool logTaskLoop(){
+      RenameThread("utxo-log");
+      FILE *fileout = fsbridge::fopen(GetDataDir() / "utxo.log", "a");
+      if (!fileout) {
+          LogPrintf("failed open utxo.log\n");
+          return false;
+      }
+      //setbuf(fileout, nullptr);
+      CAutoFile logf{fileout, 0, 0};
+
+      for(;;){
+	      CCoinsStats stats;
+	      logQueue.wait_and_pop(stats);
+	      auto line = stats.ToString();
+
+	      try {
+		      logf.write(line.c_str(), line.size());
+	      } catch (const std::ios_base::failure &e) {
+		      LogPrintf("wirte utxo.log failed:%s\n", e.what());
+		      return false;
+	      }
+      }
+}
+
 static bool ConnectTip(const Config &config, CValidationState &state,
                        CBlockIndex *pindexNew,
                        const std::shared_ptr<const CBlock> &pblock,
@@ -2909,38 +2986,19 @@ static bool ConnectTip(const Config &config, CValidationState &state,
     LogPrint(BCLog::BENCH, "  - Writing chainstate: %.2fms [%.2fs]\n",
              (nTime5 - nTime4) * 0.001, nTimeChainState * 0.000001);
 
-    if (pindexNew->nHeight > 0) {
-        CCoinsStats stats;
-        if (!GetUTXOStats(pcoinsTip, stats)) {
-            LogPrintf("failed get utxo stats\n");
-            return false;
-        }
-        FILE *fileout = fsbridge::fopen(GetDataDir() / "utxo.log", "a");
-        if (!fileout) {
-            LogPrintf("failed open utxo.log\n");
-            return false;
-        }
-        //setbuf(fileout, nullptr);
-        CAutoFile logf{fileout, 0, 0};
-        auto line = stats.ToString();
-
-        try {
-            logf.write(line.c_str(), line.size());
-        } catch (const std::ios_base::failure &e) {
-            LogPrintf("wirte utxo.log failed:%s\n", e.what());
-            return false;
-        }
-
-	/*
-        if (pindexNew->nHeight == 383) {
-            AbortNode("terminate after recv height 383 block");
-        }
-	*/
-        int64_t nTime6 = GetTimeMicros();
-	nTimeUtxoStat += nTime6 -nTime5;
-	LogPrint(BCLog::BENCH, "  - utxo stats: %.2fms [%.2fs]\n",
-             (nTime6 - nTime5) * 0.001,  nTimeUtxoStat * 0.000001);
-    }
+  if (pindexNew->nHeight > 0) {
+	auto cur  = pcoinsTip->Cursor();
+	statQueue.push(cur);
+    /*
+      if (pindexNew->nHeight == 383) {
+          AbortNode("terminate after recv height 383 block");
+      }
+    */
+      int64_t nTime6 = GetTimeMicros();
+    nTimeUtxoStat += nTime6 -nTime5;
+    LogPrint(BCLog::BENCH, " push utxo stats: %.2fms [%.2fs]\n",
+           (nTime6 - nTime5) * 0.001,  nTimeUtxoStat * 0.000001);
+  }
 
     
     // Remove conflicting transactions from the mempool.;
