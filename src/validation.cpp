@@ -2745,8 +2745,16 @@ public:
  * by copying pblock) - if that is not intended, care must be taken to remove
  * the last entry in blocksConnected in case of failure.
  */
-namespace {
 
+static std::atomic<bool> fNetClose{false};
+void setNetClose(){
+	fNetClose = true;
+}
+bool netClosed(){
+	return fNetClose;
+}
+
+namespace {
 template<typename T>
 class threadsafe_queue
 {
@@ -2892,23 +2900,29 @@ static bool GetUTXOStats(CCoinsViewCursor* cursor) {
 void statTaskLoop(){
         RenameThread("utxo-stat");
 	for(;;){
+		if(netClosed() && statQueue.empty()) {
+				break;
+		} 
 		CCoinsViewCursor*  cur{nullptr};
 		statQueue.wait_and_pop(cur);
 		GetUTXOStats(cur);
 	}
 }
 
-bool logTaskLoop(){
+void logTaskLoop(){
       RenameThread("utxo-log");
       FILE *fileout = fsbridge::fopen(GetDataDir() / "utxo.log", "a");
       if (!fileout) {
           LogPrintf("failed open utxo.log\n");
-          return false;
+          return ;
       }
       //setbuf(fileout, nullptr);
       CAutoFile logf{fileout, 0, 0};
 
       for(;;){
+	     if(netClosed() && logQueue.empty()) {
+				break;
+	      } 
 	      CCoinsStats stats;
 	      logQueue.wait_and_pop(stats);
 	      auto line = stats.ToString();
@@ -2917,7 +2931,7 @@ bool logTaskLoop(){
 		      logf.write(line.c_str(), line.size());
 	      } catch (const std::ios_base::failure &e) {
 		      LogPrintf("wirte utxo.log failed:%s\n", e.what());
-		      return false;
+		      return ;
 	      }
       }
 }
@@ -2989,6 +3003,7 @@ static bool ConnectTip(const Config &config, CValidationState &state,
   if (pindexNew->nHeight > 0) {
 	auto cur  = pcoinsTip->Cursor();
 	statQueue.push(cur);
+
     /*
       if (pindexNew->nHeight == 383) {
           AbortNode("terminate after recv height 383 block");
