@@ -371,7 +371,8 @@ void UnloadBlockIndex();
  */
 void ThreadScriptCheck();
 void statTaskLoop();
-bool logTaskLoop();
+void logTaskLoop();
+void setNetClose();
 /**
  * Check whether we are doing an initial block download (synchronizing from disk
  * or network)
