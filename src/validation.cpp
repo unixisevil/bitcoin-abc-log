@@ -2547,6 +2547,7 @@ static int64_t nTimeConnectTotal = 0;
 static int64_t nTimeFlush = 0;
 static int64_t nTimeChainState = 0;
 static int64_t nTimePostConnect = 0;
+static int64_t nTimeUtxoStat  = 0;
 
 struct PerBlockConnectTrace {
     CBlockIndex *pindex = nullptr;
@@ -2620,6 +2621,109 @@ public:
     }
 };
 
+namespace {
+
+struct CCoinsStats {
+    int nHeight;
+    uint256 hashBlock;
+    uint64_t nTransactions;
+    uint64_t nTransactionOutputs;
+    uint64_t nBogoSize;
+    uint256 hashSerialized;
+    uint64_t nDiskSize;
+    Amount nTotalAmount;
+
+    CCoinsStats()
+        : nHeight(0), nTransactions(0), nTransactionOutputs(0), nBogoSize(0),
+          nDiskSize(0), nTotalAmount(0) {}
+
+    std::string ToString() const {
+	    /*
+        return strprintf("height=%d,bestblock=%s,transactions=%d,txouts=%d,"
+                         "hash_serialized=%s,total_amount=%d\n",
+                         nHeight, hashBlock.GetHex(), nTransactions,
+                         nTransactionOutputs, hashSerialized.GetHex(),
+                         nTotalAmount.GetSatoshis());
+			 */
+	 return strprintf("height=%d,bestblock=%s,hash_serialized=%s\n",
+                         nHeight, hashBlock.GetHex(), hashSerialized.GetHex());
+
+    }
+};
+
+//static void ApplyStats(CCoinsStats &stats, CDataStream &ss, const uint256 &hash,
+//                       const std::map<uint32_t, Coin> &outputs) {
+//    assert(!outputs.empty());
+//    ss << hash;
+//    ss << VARINT(outputs.begin()->second.GetHeight() * 2 +
+//                 outputs.begin()->second.IsCoinBase());
+//    // LogPrintf("after serialize height and coinbase, get bytes=%s\n",
+//    // HexStr(ss.str())); auto height = outputs.begin()->second.GetHeight(); auto
+//    // const& txout  = outputs.begin()->second.GetTxOut(); LogPrintf("block
+//    // height=%d, get coin value=%lu, scriptPubKey=%s\n",  height, txout.nValue,
+//    // HexStr(txout.scriptPubKey));
+//    stats.nTransactions++;
+//    for (const auto output : outputs) {
+//        ss << VARINT(output.first + 1);
+//        // LogPrintf("after txindex+1, get bytes=%s\n", HexStr(ss.str()));
+//        ss << output.second.GetTxOut().scriptPubKey;
+//        // LogPrintf("after scriptPubKey get bytes=%s\n", HexStr(ss.str()));
+//        ss << VARINT(output.second.GetTxOut().nValue.GetSatoshis());
+//        // LogPrintf("after nValue get bytes=%s\n", HexStr(ss.str()));
+//        stats.nTransactionOutputs++;
+//        stats.nTotalAmount += output.second.GetTxOut().nValue;
+//        stats.nBogoSize +=
+//            32 /* txid */ + 4 /* vout index */ + 4 /* height + coinbase */ +
+//            8 /* amount */ + 2 /* scriptPubKey len */ +
+//            output.second.GetTxOut().scriptPubKey.size() /* scriptPubKey */;
+//    }
+//    ss << VARINT(0);
+//}
+
+static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
+
+    //std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
+    auto  coinTip = dynamic_cast<CCoinsViewCache*>(view);
+    auto  coindbCatcher = dynamic_cast<CCoinsViewBacked*>(coinTip->GetBackend()); 
+    auto  pcoinsdbview = dynamic_cast<CCoinsViewDB*> (coindbCatcher->GetBackend());
+    assert(pcoinsdbview != nullptr);
+    LogPrintf("pcoinsdbview=%p\n", pcoinsdbview);
+    auto  dbw = pcoinsdbview->GetDBW();
+    std::unique_ptr<CDBIterator> pcursor (dbw.NewIterator());
+    stats.hashBlock = pcoinsdbview->GetBestBlock();
+    LogPrintf("before lock cs_main, got hashBlock=%s\n", HexStr(stats.hashBlock));
+    {
+        LOCK(cs_main);
+        stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
+    }
+    LogPrintf("after lock cs_main\n");
+    CSingleHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
+    std::vector<char>  key;
+    std::vector<char>  val;
+
+    int64_t b = GetTimeMicros();
+    ss << stats.hashBlock;
+    pcursor->Seek('C');
+    while (pcursor->Valid()) {
+        boost::this_thread::interruption_point();
+        //CDataStream val(SER_GETHASH, PROTOCOL_VERSION);
+        if (pcursor->GetKey(key) && pcursor->GetValue(val)) {
+		ss << FLATDATA(key);
+		ss << FLATDATA(val);
+        } else {
+            return error("%s: unable to read value", __func__);
+        }
+        pcursor->Next();
+    }
+    int64_t e = GetTimeMicros();
+    LogPrint(BCLog::BENCH, "- iter utxo leveldb: %.2fms\n",(e-b ) * 0.001);
+    stats.hashSerialized = ss.GetHash();
+    return true;
+}
+
+} // utxo stats namespace
+
+
 /**
  * Connect a new block to chainActive. pblock is either nullptr or a pointer to
  * a CBlock corresponding to pindexNew, to bypass loading it again from disk.
@@ -2628,6 +2732,7 @@ public:
  * by copying pblock) - if that is not intended, care must be taken to remove
  * the last entry in blocksConnected in case of failure.
  */
+
 static bool ConnectTip(const Config &config, CValidationState &state,
                        CBlockIndex *pindexNew,
                        const std::shared_ptr<const CBlock> &pblock,
@@ -2692,6 +2797,39 @@ static bool ConnectTip(const Config &config, CValidationState &state,
     nTimeChainState += nTime5 - nTime4;
     LogPrint(BCLog::BENCH, "  - Writing chainstate: %.2fms [%.2fs]\n",
              (nTime5 - nTime4) * 0.001, nTimeChainState * 0.000001);
+
+    if (pindexNew->nHeight > 0) {
+        CCoinsStats stats;
+        if (!GetUTXOStats(pcoinsTip, stats)) {
+            LogPrintf("failed get utxo stats\n");
+            return false;
+        }
+        FILE *fileout = fsbridge::fopen(GetDataDir() / "utxo.log", "a");
+        if (!fileout) {
+            LogPrintf("failed open utxo.log\n");
+            return false;
+        }
+        //setbuf(fileout, nullptr);
+        CAutoFile logf{fileout, 0, 0};
+        auto line = stats.ToString();
+
+        try {
+            logf.write(line.c_str(), line.size());
+        } catch (const std::ios_base::failure &e) {
+            LogPrintf("wirte utxo.log failed:%s\n", e.what());
+            return false;
+        }
+
+	/*
+        if (pindexNew->nHeight == 383) {
+            AbortNode("terminate after recv height 383 block");
+        }
+	*/
+        int64_t nTime6 = GetTimeMicros();
+	nTimeUtxoStat += nTime6 -nTime5;
+	LogPrint(BCLog::BENCH, "  - utxo stats: %.2fms [%.2fs]\n",
+             (nTime6 - nTime5) * 0.001,  nTimeUtxoStat * 0.000001);
+    }
 
     // Remove conflicting transactions from the mempool.;
     mempool.removeForBlock(blockConnecting.vtx, pindexNew->nHeight);

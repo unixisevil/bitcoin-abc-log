@@ -70,6 +70,10 @@ protected:
 
 public:
     CCoinsViewDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
+    const  CDBWrapper& GetDBW() const {
+	    return  db;
+    }
+
 
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
