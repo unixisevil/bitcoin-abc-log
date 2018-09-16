@@ -2681,22 +2681,18 @@ struct CCoinsStats {
 //}
 
 static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
-
-    //std::unique_ptr<CCoinsViewCursor> pcursor(view->Cursor());
     auto  coinTip = dynamic_cast<CCoinsViewCache*>(view);
     auto  coindbCatcher = dynamic_cast<CCoinsViewBacked*>(coinTip->GetBackend()); 
     auto  pcoinsdbview = dynamic_cast<CCoinsViewDB*> (coindbCatcher->GetBackend());
     assert(pcoinsdbview != nullptr);
     LogPrintf("pcoinsdbview=%p\n", pcoinsdbview);
-    auto  dbw = pcoinsdbview->GetDBW();
+    auto&  dbw = pcoinsdbview->GetDBW();
     std::unique_ptr<CDBIterator> pcursor (dbw.NewIterator());
     stats.hashBlock = pcoinsdbview->GetBestBlock();
-    LogPrintf("before lock cs_main, got hashBlock=%s\n", HexStr(stats.hashBlock));
     {
         LOCK(cs_main);
         stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
     }
-    LogPrintf("after lock cs_main\n");
     CSingleHashWriter ss(SER_GETHASH, PROTOCOL_VERSION);
     std::vector<char>  key;
     std::vector<char>  val;
@@ -2706,8 +2702,7 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     pcursor->Seek('C');
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
-        //CDataStream val(SER_GETHASH, PROTOCOL_VERSION);
-        if (pcursor->GetKey(key) && pcursor->GetValue(val)) {
+        if (pcursor->GetK(key) && pcursor->GetV(val)) {
 		ss << FLATDATA(key);
 		ss << FLATDATA(val);
         } else {
@@ -2789,7 +2784,7 @@ static bool ConnectTip(const Config &config, CValidationState &state,
 
     // Write the chain state to disk, if necessary.
     if (!FlushStateToDisk(config.GetChainParams(), state,
-                          FLUSH_STATE_IF_NEEDED)) {
+                          FLUSH_STATE_ALWAYS)) {
         return false;
     }
 

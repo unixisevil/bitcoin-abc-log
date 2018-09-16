@@ -140,6 +140,28 @@ public:
 
     void Next();
 
+     bool GetK(std::vector<char>& key) {
+        leveldb::Slice slKey = piter->key();
+	try{
+		  key.assign(slKey.data(), slKey.data() + slKey.size());
+	}catch (const std::exception &) {
+		LogPrintf("GetKey(), specific\n");
+		return false;
+	}
+	return true;
+     }
+
+     bool GetV(std::vector<char>& val) {
+        leveldb::Slice slValue = piter->value();
+	try{
+		val.assign(slValue.data(), slValue.data() + slValue.size());
+	}catch (const std::exception &) {
+		LogPrintf("GetValue(), specific\n");
+		return false;
+	}
+	return true;
+     }
+
     template <typename K> bool GetKey(K &key) {
         leveldb::Slice slKey = piter->key();
         try {

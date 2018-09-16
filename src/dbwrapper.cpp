@@ -202,27 +202,6 @@ void CDBIterator::Next() {
     piter->Next();
 }
 
-template<> 
-bool CDBIterator::GetKey(std::vector<char>& key) {
-        leveldb::Slice slKey = piter->key();
-	try{
-		  key.assign(slKey.data(), slKey.data() + slKey.size());
-	}catch (const std::exception &) {
-		return false;
-	}
-	return true;
-}
-
-template<> 
-bool CDBIterator::GetValue(std::vector<char>& val) {
-        leveldb::Slice slValue = piter->value();
-	try{
-		val.assign(slValue.data(), slValue.data() + slValue.size());
-	}catch (const std::exception &) {
-		return false;
-	}
-	return true;
-}
 
 namespace dbwrapper_private {
 

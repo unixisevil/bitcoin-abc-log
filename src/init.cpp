@@ -1982,7 +1982,6 @@ bool AppInitMain(Config &config, boost::thread_group &threadGroup,
                     new CBlockTreeDB(nBlockTreeDBCache, false, fReindex);
                 pcoinsdbview = new CCoinsViewDB(nCoinDBCache, false,
                                                 fReindex || fReindexChainState);
-		LogPrintf("after construct, pcoinsdbview=%p\n", pcoinsdbview);
                 pcoinscatcher = new CCoinsViewErrorCatcher(pcoinsdbview);
 
                 if (fReindex) {

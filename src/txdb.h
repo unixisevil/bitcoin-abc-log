@@ -70,7 +70,7 @@ protected:
 
 public:
     CCoinsViewDB(size_t nCacheSize, bool fMemory = false, bool fWipe = false);
-    const  CDBWrapper& GetDBW() const {
+    CDBWrapper& GetDBW() {
 	    return  db;
     }
 
