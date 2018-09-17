@@ -2685,7 +2685,6 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     auto  coindbCatcher = dynamic_cast<CCoinsViewBacked*>(coinTip->GetBackend()); 
     auto  pcoinsdbview = dynamic_cast<CCoinsViewDB*> (coindbCatcher->GetBackend());
     assert(pcoinsdbview != nullptr);
-    LogPrintf("pcoinsdbview=%p\n", pcoinsdbview);
     auto&  dbw = pcoinsdbview->GetDBW();
     std::unique_ptr<CDBIterator> pcursor (dbw.NewIterator());
     stats.hashBlock = pcoinsdbview->GetBestBlock();
@@ -2703,8 +2702,8 @@ static bool GetUTXOStats(CCoinsView *view, CCoinsStats &stats) {
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
         if (pcursor->GetK(key) && pcursor->GetV(val)) {
-		ss << FLATDATA(key);
-		ss << FLATDATA(val);
+		ss << CFlatData(key);
+		ss << CFlatData(val);
         } else {
             return error("%s: unable to read value", __func__);
         }
