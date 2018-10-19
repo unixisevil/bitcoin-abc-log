@@ -2859,7 +2859,7 @@ static bool ConnectTip(const Config &config, CValidationState &state,
     CCoinsStats stats;
     stats.hashBlock = pcoinsdbview->GetBestBlock();
     stats.nHeight = mapBlockIndex.find(stats.hashBlock)->second->nHeight;
-    statQueue.push(taskArg(std::move(stats), std::move(pcursor)));
+    statQueue.wait_and_push(taskArg(std::move(stats), std::move(pcursor)));
 
     int64_t nTime6 = GetTimeMicros();
     nTimeUtxoStat += nTime6 -nTime5;
